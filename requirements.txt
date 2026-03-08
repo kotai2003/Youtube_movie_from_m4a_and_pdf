@@ -1,0 +1,24 @@
+# 音声文字起こし（ローカルWhisper）
+openai-whisper
+
+# スライド処理
+python-pptx
+PyMuPDF
+
+# OCR（画像ベーススライド対応）
+easyocr
+
+# 動画生成
+moviepy==1.0.3
+Pillow
+
+# Ollama連携
+requests
+
+# 設定ファイル
+pyyaml
+
+# ドキュメント生成
+mkdocs
+mkdocs-material
+mkdocstrings[python]

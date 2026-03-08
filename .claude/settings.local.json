@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(cp:*)",
+      "Bash(rm:*)",
+      "Bash(grep:*)",
+      "Bash(pip install:*)",
+      "Bash(mkdocs build:*)",
+      "Bash(timeout 8 mkdocs serve:*)",
+      "Bash(mv:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(conda activate:*)",
+      "Bash(\"C:/Users/seong/anaconda3/envs/py313_youtube/python.exe\":*)",
+      "Bash(taskkill:*)"
+    ]
+  }
+}

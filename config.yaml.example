@@ -1,0 +1,25 @@
+audio_file: input/your_audio.m4a
+slides_file: input/your_slides.pdf
+output_dir: output
+output_video: output/podcast_video.mp4
+whisper:
+  model: small
+  language: auto
+ocr:
+  languages:
+  - ja
+  - en
+ollama:
+  base_url: http://localhost:11434
+  model: gemma3:12b
+video:
+  width: 1920
+  height: 1080
+  fps: 24
+  fade_duration: 0.5
+subtitle:
+  generate_srt: true
+  burn_in: false
+  font_size: 42
+  margin_bottom: 80
+  bg_opacity: 160

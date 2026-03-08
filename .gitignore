@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+venv/
+.venv/
+
+# PyInstaller / Build
+build/
+dist/
+pyinstaller/cython_build_tmp/
+
+# MkDocs
+site/
+
+# Input/Output data (user-specific)
+input/
+output/
+
+# Old version (previous codebase)
+old/
+
+# Media / temp files
+*.mp4
+*.m4a
+*.wav
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Config (contains local paths)
+config.yaml
+
+# Environment
+.env
+
+# App state
+.recent_projects.json
