@@ -72,6 +72,8 @@ input/ (audio + slides)
 
 ## Config (config.yaml)
 
+`config.yaml` is gitignored (contains local paths). Users copy `config.yaml.example` to `config.yaml` and edit.
+
 Key settings: `audio_file`, `slides_file`, `ollama.model`, `whisper.model`, `whisper.language`, `video.*` (resolution/fps), `subtitle.*` (SRT generation, burn-in options).
 
 ## Language
@@ -91,7 +93,7 @@ All file paths are handled as absolute paths to avoid issues with Japanese (non-
 
 ```
 ├── gui_apps/                   # GUI applications (all tkinter/ttk GUIs)
-│   ├── run_gui_app.py       #   Podcast AI Studio (recommended)
+│   ├── run_gui_app.py          #   Podcast AI Studio (recommended)
 │   ├── run_gui_rev003.py       #   Studio 3-panel layout
 │   ├── run_gui_rev002.py       #   Multilingual subtitle GUI
 │   ├── run_gui.py              #   Original simple GUI launcher
@@ -103,14 +105,12 @@ All file paths are handled as absolute paths to avoid issues with Japanese (non-
 ├── step3_match.py              # Ollama LLM slide-audio matching
 ├── step4_generate_video.py     # FFmpeg video generation
 ├── subtitle_generator.py       # SRT subtitle generation
-├── config.yaml                 # Runtime configuration
-├── old/                        # Previous version (not actively used)
-├── input/                      # Input audio + slides
-└── output/                     # Generated artifacts
+├── config.yaml.example         # Configuration template
+├── input/                      # Input audio + slides (gitignored)
+└── output/                     # Generated artifacts (gitignored)
 ```
 
 ## Notes
 
-- The `old/` directory contains a previous version of the code — not actively used
 - Each step can be re-run independently using cached intermediate JSON files in `output/`
 - `cuesheet.json` can be manually edited to fix slide timing before running step 4

@@ -47,31 +47,13 @@ pip install -r requirements.txt
 
 > Whisperの初回実行時にモデルがダウンロードされます（smallモデルで約500MB）
 
-### 3. ファイル配置
+### 3. 設定ファイル
 
-```
-podcast-video-generator/
-├── input/
-│   ├── podcast.mp3          ← 音声ファイルをここに置く
-│   └── slides.pptx          ← スライドをここに置く（またはslides.pdf）
-├── gui_apps/                 ← GUI関連
-│   ├── run_gui_app.py     ← メインGUI（推奨）
-│   ├── run_gui_rev003.py
-│   ├── run_gui_rev002.py
-│   ├── run_gui.py
-│   ├── gui_app.py
-│   └── ollama_utils.py
-├── config.yaml               ← パスやモデルを設定
-├── main.py                   ← CLIエントリーポイント
-├── step1_extract_slides.py
-├── step2_transcribe.py
-├── step3_match.py
-├── step4_generate_video.py
-├── subtitle_generator.py
-└── old/                      ← 旧バージョン（未使用）
+```bash
+cp config.yaml.example config.yaml
 ```
 
-### 4. 設定ファイル（config.yaml）
+`config.yaml` を開いて、音声ファイルとスライドのパスを設定します：
 
 ```yaml
 audio_file: "input/podcast.mp3"     # 音声ファイルのパス
@@ -79,6 +61,16 @@ slides_file: "input/slides.pptx"    # スライドのパス（.pptx or .pdf）
 ```
 
 最低限、上記2つのパスを正しく設定すれば動作します。
+
+### 4. ファイル配置
+
+`input/` ディレクトリに音声ファイルとスライドを配置してください。
+
+```
+input/
+├── podcast.mp3          ← 音声ファイル
+└── slides.pptx          ← スライド（またはslides.pdf）
+```
 
 ## 使い方
 
@@ -171,6 +163,26 @@ output/
 ### 日本語フォルダ名で動作しない
 → v0.4.1で修正済み。プロジェクトフォルダや入力ファイルのパスに日本語（非ASCII文字）が含まれていても正常に動作します。
 → GUIのファイル選択では絶対パスを使用し、FFmpegへのパス受け渡しもUnicode対応済みです。
+
+## プロジェクト構成
+
+```
+├── gui_apps/                   # GUI アプリケーション
+│   ├── run_gui_app.py          #   Podcast AI Studio（推奨）
+│   ├── run_gui_rev003.py       #   Studio 3パネル版
+│   ├── run_gui_rev002.py       #   多言語字幕対応版
+│   ├── run_gui.py              #   初期版ランチャー
+│   ├── gui_app.py              #   初期版実装
+│   └── ollama_utils.py         #   Ollamaモデル一覧ユーティリティ
+├── main.py                     # CLIエントリーポイント
+├── step1_extract_slides.py     # スライド抽出（PPTX/PDF + OCR）
+├── step2_transcribe.py         # Whisper文字起こし
+├── step3_match.py              # Ollama LLMマッチング
+├── step4_generate_video.py     # FFmpeg動画生成
+├── subtitle_generator.py       # SRT字幕生成
+├── config.yaml.example         # 設定ファイルテンプレート
+└── requirements.txt            # Pythonパッケージ
+```
 
 ## GUI画面構成（rev004）
 
