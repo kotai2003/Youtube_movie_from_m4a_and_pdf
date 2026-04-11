@@ -9,9 +9,12 @@ import os
 import sys
 import json
 import queue
+import shutil
+import tempfile
 import threading
 import subprocess
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, filedialog, scrolledtext
 from datetime import datetime
 
@@ -19,10 +22,74 @@ import yaml
 from PIL import Image, ImageTk, ImageDraw
 
 # ---------------------------------------------------------------------------
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# PROJECT_ROOT resolution.
+#
+# - Dev mode: parent of the gui_apps/ directory containing this file.
+# - Frozen mode (PyInstaller --onedir): the bundled pipeline scripts
+#   live next to this file at sys._MEIPASS (i.e. the _internal/ folder),
+#   so we use that as PROJECT_ROOT for resolving main.py / step scripts
+#   and config.yaml.
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+else:
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.yaml")
 RECENT_PATH = os.path.join(PROJECT_ROOT, ".recent_projects.json")
+
+
+# ---------------------------------------------------------------------------
+# Path helpers (Japanese / non-ASCII path safety on Windows)
+# ---------------------------------------------------------------------------
+def _resolve_path(p: str) -> str:
+    """Return *p* as an absolute, normalised path string.
+
+    If *p* is already absolute it is returned as-is (normalised).
+    Otherwise it is resolved relative to ``PROJECT_ROOT``. Handles
+    Japanese / non-ASCII characters safely via ``pathlib.Path``.
+    """
+    if not p:
+        return ""
+    pp = Path(p)
+    if not pp.is_absolute():
+        pp = Path(PROJECT_ROOT) / pp
+    # Do not call resolve() — it may follow symlinks / fail on
+    # non-existent paths. absolute() + os.path.normpath is enough.
+    return os.path.normpath(str(pp))
+
+
+def _ascii_safe_audio(audio_path: str):
+    """Return an ASCII-only path for *audio_path*, copying if necessary.
+
+    Some FFmpeg builds on Windows fail to open files whose path
+    contains Japanese / non-ASCII characters, which breaks Whisper
+    audio loading.  As a reliable workaround, when the path is not
+    ASCII-only we copy the file to the system temp directory (which
+    always has an ASCII-safe path) and use that copy.
+
+    Returns
+    -------
+    tuple[str, str | None]
+        ``(path_to_use, tmp_to_cleanup)``.  ``tmp_to_cleanup`` is the
+        caller's responsibility to remove; it is ``None`` when no
+        copy was required.
+    """
+    if not audio_path or sys.platform != "win32":
+        return audio_path, None
+    try:
+        audio_path.encode("ascii")
+        return audio_path, None  # already ASCII
+    except UnicodeEncodeError:
+        pass
+    try:
+        ext = os.path.splitext(audio_path)[1]
+        fd, tmp = tempfile.mkstemp(suffix=ext, prefix="podcast_ai_")
+        os.close(fd)
+        shutil.copy2(audio_path, tmp)
+        return tmp, tmp
+    except Exception:
+        # Fall back to the original path; Whisper may still succeed
+        return audio_path, None
 
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 LANG_OPTIONS = {"auto": "Auto Detect", "ja": "Japanese", "ko": "Korean", "en": "English"}
@@ -103,10 +170,15 @@ def load_config() -> dict:
 def save_config(audio_file, slides_file, ollama_model, output_dir,
                 whisper_model="small", whisper_language="auto"):
     config = load_config()
+    # Always store resolved absolute paths so downstream subprocess
+    # steps work regardless of CWD or relative-vs-absolute mixing.
+    audio_file = _resolve_path(audio_file)
+    slides_file = _resolve_path(slides_file)
+    output_dir = _resolve_path(output_dir)
     config["audio_file"] = audio_file
     config["slides_file"] = slides_file
     config["output_dir"] = output_dir
-    config["output_video"] = os.path.join(output_dir, "podcast_video.mp4")
+    config["output_video"] = str(Path(output_dir) / "podcast_video.mp4") if output_dir else "podcast_video.mp4"
     config.setdefault("ollama", {})["model"] = ollama_model
     config.setdefault("whisper", {})["model"] = whisper_model
     config["whisper"]["language"] = whisper_language
@@ -133,16 +205,37 @@ def transcribe_with_language_detection(audio_file, output_dir,
                                        log_fn=None):
     import whisper
     log = log_fn or print
+
+    # Normalise paths so Japanese characters in folders / filenames are
+    # handled consistently.
+    audio_file = _resolve_path(audio_file)
+    output_dir = _resolve_path(output_dir)
+
     log("Whisper transcription started")
     log(f"  Model: {model_name}  |  Language: {language}")
     log(f"  File: {audio_file}")
+
+    # Whisper invokes ffmpeg internally; some Windows ffmpeg builds
+    # fail on non-ASCII filenames. Use a temporary ASCII copy when
+    # required.
+    audio_for_whisper, tmp_audio = _ascii_safe_audio(audio_file)
+    if tmp_audio:
+        log("  (Using ASCII-safe temporary copy for non-ASCII audio path)")
+
     log("  Loading model...")
     model = whisper.load_model(model_name)
     log("  Transcribing...")
     args = {"task": "transcribe", "verbose": False}
     if language != "auto":
         args["language"] = language
-    result = model.transcribe(audio_file, **args)
+    try:
+        result = model.transcribe(audio_for_whisper, **args)
+    finally:
+        if tmp_audio:
+            try:
+                os.remove(tmp_audio)
+            except OSError:
+                pass
     detected_lang = result.get("language", "en")
     log(f"  Detected language: {lang_display_name(detected_lang)} ({detected_lang})")
     segments = [{"start": round(s["start"], 2), "end": round(s["end"], 2),
@@ -192,19 +285,50 @@ def save_recent_project(name, audio, slides, output_dir):
 
 
 # ---------------------------------------------------------------------------
-# Generate app icon programmatically
+# App icon — bundled .ico (preferred) with a programmatic Pillow fallback
 # ---------------------------------------------------------------------------
+def _find_app_icon_path() -> str | None:
+    """Locate the bundled `app_icon.ico`.
+
+    Search order:
+      1. Next to this script (frozen mode: ``_internal/app_icon.ico``,
+         dev mode: ``gui_apps/app_icon.ico`` if a copy were placed there)
+      2. ``PROJECT_ROOT/app_icon.ico``
+      3. ``PROJECT_ROOT/pyinstaller/app_icon.ico`` (dev mode source)
+    """
+    candidates = [
+        os.path.join(PROJECT_ROOT, "app_icon.ico"),
+        os.path.join(PROJECT_ROOT, "pyinstaller", "app_icon.ico"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "app_icon.ico"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 def _create_app_icon(size=64):
+    """Pillow fallback when ``app_icon.ico`` cannot be located."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    # rounded rect bg
-    draw.rounded_rectangle([0, 0, size-1, size-1], radius=size//6,
-                           fill="#89b4fa", outline="#6a96d9", width=2)
-    # play triangle
+    pad = max(1, size // 32)
+    r = size // 6
+    draw.rounded_rectangle(
+        [pad, pad, size - 1 - pad, size - 1 - pad],
+        radius=r,
+        fill=(30, 30, 46, 255),
+        outline=(137, 180, 250, 255),
+        width=max(2, size // 32),
+    )
     cx, cy = size // 2, size // 2
-    s = size // 4
-    pts = [(cx - s//2 + 2, cy - s), (cx - s//2 + 2, cy + s), (cx + s, cy)]
-    draw.polygon(pts, fill="#1e1e2e")
+    s = size // 3
+    pts = [
+        (cx - s // 2, cy - s),
+        (cx - s // 2, cy + s),
+        (cx + s, cy),
+    ]
+    draw.polygon(pts, fill=(137, 180, 250, 255))
     return img
 
 
@@ -230,11 +354,24 @@ class PodcastAIStudio(tk.Tk):
         self.minsize(1100, 700)
         self.configure(bg=C["bg"])
 
-        # App icon
+        # App icon — prefer the bundled multi-resolution .ico (looks
+        # crisp in the title bar / taskbar / Alt-Tab list); fall back to
+        # the Pillow-rendered placeholder if the file is missing.
         try:
-            icon_img = _create_app_icon(64)
-            self._icon_photo = ImageTk.PhotoImage(icon_img)
-            self.iconphoto(True, self._icon_photo)
+            ico_path = _find_app_icon_path()
+            if ico_path:
+                # iconbitmap accepts an .ico file path on Windows and
+                # uses every embedded resolution.
+                self.iconbitmap(default=ico_path)
+                # Also set iconphoto so taskbar icon is correct on
+                # systems where iconbitmap alone is insufficient.
+                ico_img = Image.open(ico_path)
+                self._icon_photo = ImageTk.PhotoImage(ico_img)
+                self.iconphoto(True, self._icon_photo)
+            else:
+                icon_img = _create_app_icon(64)
+                self._icon_photo = ImageTk.PhotoImage(icon_img)
+                self.iconphoto(True, self._icon_photo)
         except Exception:
             pass
 
@@ -627,9 +764,9 @@ class PodcastAIStudio(tk.Tk):
         idx = self.recent_var.current()
         if 0 <= idx < len(recent):
             p = recent[idx]
-            self.audio_var.set(p.get("audio", ""))
-            self.slides_var.set(p.get("slides", ""))
-            self.output_var.set(p.get("output_dir", "output"))
+            self.audio_var.set(_resolve_path(p.get("audio", "")))
+            self.slides_var.set(_resolve_path(p.get("slides", "")))
+            self.output_var.set(_resolve_path(p.get("output_dir", "output")))
             self.project_name_var.set(p.get("name", ""))
             self._log("[Project] Loaded: " + p.get("name", ""))
 
@@ -1113,32 +1250,42 @@ class PodcastAIStudio(tk.Tk):
             title="Select Audio File",
             filetypes=[("Audio", "*.mp3 *.m4a *.wav *.ogg *.flac"),
                        ("All", "*.*")],
-            initialdir=os.path.join(PROJECT_ROOT, "input"))
+            initialdir=_resolve_path("input"))
         if path:
-            self.audio_var.set(os.path.abspath(path))
+            self.audio_var.set(_resolve_path(path))
 
     def _browse_slides(self):
         path = filedialog.askopenfilename(
             title="Select Slides File",
             filetypes=[("Slides", "*.pptx *.pdf"), ("All", "*.*")],
-            initialdir=os.path.join(PROJECT_ROOT, "input"))
+            initialdir=_resolve_path("input"))
         if path:
-            self.slides_var.set(os.path.abspath(path))
+            self.slides_var.set(_resolve_path(path))
 
     def _browse_output(self):
         path = filedialog.askdirectory(
             title="Select Output Folder",
-            initialdir=os.path.join(PROJECT_ROOT,
-                                    self.output_var.get() or "output"))
+            initialdir=_resolve_path(self.output_var.get() or "output"))
         if path:
-            self.output_var.set(os.path.abspath(path))
+            resolved = _resolve_path(path)
+            self.output_var.set(resolved)
+            # If the user accidentally drilled into the slide_images
+            # subfolder created by a previous Step 1 run and clicked
+            # "Select Folder" there, all pipeline outputs would land
+            # inside slide_images/ and Step 3/4 would be unable to find
+            # slides_info.json / cuesheet.json. Auto-correct one level up.
+            if os.path.basename(resolved).lower() == "slide_images":
+                parent = os.path.dirname(resolved)
+                self.output_var.set(parent)
+                self._log(f"[INFO] Output Folder was 'slide_images' (a "
+                          f"pipeline-internal subfolder). Auto-corrected "
+                          f"to parent: {parent}")
 
     # -----------------------------------------------------------------------
     # Preview
     # -----------------------------------------------------------------------
     def _load_slide_images(self):
-        output_dir = os.path.join(
-            PROJECT_ROOT, self.output_var.get().strip() or "output")
+        output_dir = _resolve_path(self.output_var.get().strip() or "output")
         img_dir = os.path.join(output_dir, "slide_images")
         self._slide_images = []
         self._current_slide = 0
@@ -1175,8 +1322,7 @@ class PodcastAIStudio(tk.Tk):
             self._show_slide(self._current_slide + 1)
 
     def _load_subtitle_preview(self):
-        output_dir = os.path.join(
-            PROJECT_ROOT, self.output_var.get().strip() or "output")
+        output_dir = _resolve_path(self.output_var.get().strip() or "output")
         srt_path = os.path.join(output_dir, "transcript.srt")
         txt_path = os.path.join(output_dir, "transcript.txt")
         preview_path = srt_path if os.path.exists(srt_path) else txt_path
@@ -1190,8 +1336,7 @@ class PodcastAIStudio(tk.Tk):
         self.subtitle_text.config(state="disabled")
 
     def _update_output_file_status(self):
-        output_dir = os.path.join(
-            PROJECT_ROOT, self.output_var.get().strip() or "output")
+        output_dir = _resolve_path(self.output_var.get().strip() or "output")
         for fname, label in self._output_file_labels.items():
             path = os.path.join(output_dir, fname)
             if os.path.exists(path):
@@ -1211,16 +1356,15 @@ class PodcastAIStudio(tk.Tk):
 
     def _open_video(self):
         config = load_config()
-        video_path = os.path.join(
-            PROJECT_ROOT, config.get("output_video", "output/podcast_video.mp4"))
+        video_path = _resolve_path(
+            config.get("output_video", "output/podcast_video.mp4"))
         if os.path.exists(video_path):
             os.startfile(video_path)
         else:
             self._log("[WARN] Video file not found. Run pipeline first.")
 
     def _open_cuesheet(self):
-        output_dir = os.path.join(
-            PROJECT_ROOT, self.output_var.get().strip() or "output")
+        output_dir = _resolve_path(self.output_var.get().strip() or "output")
         cs_path = os.path.join(output_dir, "cuesheet.json")
         if os.path.exists(cs_path):
             os.startfile(cs_path)
@@ -1228,8 +1372,7 @@ class PodcastAIStudio(tk.Tk):
             self._log("[WARN] Cuesheet not found. Run Step 3 first.")
 
     def _open_output_folder(self):
-        output_dir = os.path.join(
-            PROJECT_ROOT, self.output_var.get().strip() or "output")
+        output_dir = _resolve_path(self.output_var.get().strip() or "output")
         if os.path.isdir(output_dir):
             os.startfile(output_dir)
         else:
@@ -1247,12 +1390,12 @@ class PodcastAIStudio(tk.Tk):
 
         if not audio:
             issues.append("Audio file not set")
-        elif not os.path.exists(os.path.join(PROJECT_ROOT, audio)):
+        elif not os.path.exists(_resolve_path(audio)):
             issues.append(f"Audio file not found: {audio}")
 
         if not slides:
             issues.append("Slides file not set")
-        elif not os.path.exists(os.path.join(PROJECT_ROOT, slides)):
+        elif not os.path.exists(_resolve_path(slides)):
             issues.append(f"Slides file not found: {slides}")
 
         if ollama.startswith("("):
@@ -1382,12 +1525,19 @@ class PodcastAIStudio(tk.Tk):
                     segments, detected_lang = self._run_whisper_inprocess()
                     if segments is None:
                         self.after(0, lambda: self._update_step_card_state(2, "failed"))
+                        self._log("[ERROR] Step 2 failed; aborting pipeline.")
                         return
                 else:
                     cmd = [sys.executable,
                            os.path.join(PROJECT_ROOT, "main.py"),
                            "--step", str(step_num)]
-                    self._run_subprocess_blocking(cmd)
+                    rc = self._run_subprocess_blocking(cmd)
+                    if rc != 0:
+                        self.after(0, lambda s=step_num:
+                                   self._update_step_card_state(s, "failed"))
+                        self._log(f"[ERROR] Step {step_num} failed "
+                                  f"(exit code {rc}); aborting pipeline.")
+                        return
 
                 self.after(0, lambda s=step_num: self._update_step_card_state(s, "done"))
                 self._update_progress(pct_start + 25,
@@ -1435,13 +1585,13 @@ class PodcastAIStudio(tk.Tk):
     def _run_whisper_inprocess(self):
         config = load_config()
         audio_file = config.get("audio_file", "")
-        audio_path = os.path.join(PROJECT_ROOT, audio_file)
-        if not os.path.exists(audio_path):
+        audio_path = _resolve_path(audio_file)
+        if not audio_path or not os.path.exists(audio_path):
             self._log(f"[ERROR] Audio file not found: {audio_file}")
             return None, None
 
-        output_dir = os.path.join(
-            PROJECT_ROOT, config.get("output_dir", "output"))
+        output_dir = _resolve_path(config.get("output_dir", "output"))
+        os.makedirs(output_dir, exist_ok=True)
 
         segments, detected_lang = transcribe_with_language_detection(
             audio_path, output_dir,
@@ -1468,7 +1618,11 @@ class PodcastAIStudio(tk.Tk):
     def _run_steps_subprocess(self, cmd, step_num):
         try:
             self._log(f"[Step {step_num}] {STEP_META[step_num]['label']}")
-            self._run_subprocess_blocking(cmd)
+            rc = self._run_subprocess_blocking(cmd)
+            if rc != 0:
+                self._log(f"[ERROR] Step {step_num} failed (exit code {rc}).")
+                self.after(0, lambda: self._update_step_card_state(step_num, "failed"))
+                return
             self._update_progress(100, f"Step {step_num} complete")
             self._log(f"[Step {step_num}] Completed")
             self.after(0, lambda: self._update_step_card_state(step_num, "done"))
@@ -1497,6 +1651,7 @@ class PodcastAIStudio(tk.Tk):
         self.process = None
         if proc.returncode != 0:
             self._log(f"[WARN] Process exited with code {proc.returncode}")
+        return proc.returncode
 
     # -----------------------------------------------------------------------
     # Progress
@@ -1578,7 +1733,80 @@ class PodcastAIStudio(tk.Tk):
 
 
 # ============================================================================
+# Pipeline-mode dispatch
+#
+# In a frozen PyInstaller --onedir build there is no separate Python
+# interpreter, so the GUI's `subprocess.Popen([sys.executable, "main.py",
+# "--step", N])` would normally re-launch the GUI exe and silently
+# discard the pipeline args. To avoid that, the same exe doubles as a
+# pipeline runner: when launched with `--step` / `--edit-cuesheet` we
+# import main.py and run its `main()` in-process instead of starting Tk.
+#
+# In dev mode this dispatcher is never reached, because the cmd uses
+# the real `python.exe` which executes `main.py` directly without ever
+# entering this script.
+# ============================================================================
+
+def _setup_stdio_for_pipeline():
+    """Wrap FD 1/2 (the parent's pipe in subprocess mode) as utf-8
+    text streams so that prints from `main.py` and the step modules
+    flow back to the GUI.
+
+    The runtime hook ``rthook_stdio.py`` reassigns ``sys.stdout`` /
+    ``sys.stderr`` to ``os.devnull`` for the windowed exe so that
+    stray prints don't crash on ``NoneType.write``.  In pipeline mode
+    that's wrong: FD 1 / FD 2 are connected to the parent GUI's pipe
+    and we want prints to go there, so we re-wrap them here.  If the
+    file descriptor isn't valid (e.g. genuine windowed launch with no
+    parent pipe), we leave the existing devnull assignment alone.
+    """
+    for fd, name in ((1, "stdout"), (2, "stderr")):
+        try:
+            f = os.fdopen(fd, "w", encoding="utf-8",
+                          errors="replace", buffering=1)
+            setattr(sys, name, f)
+        except OSError:
+            pass
+
+
+def _is_pipeline_invocation(argv) -> bool:
+    return any(a in ("--step", "--edit-cuesheet") for a in argv[1:])
+
+
+def _strip_pipeline_argv(argv):
+    """Drop a positional ``main.py`` path that the GUI cmd appends for
+    dev-mode compatibility, so the bundled pipeline ``main()``'s
+    argparse only sees the flags it understands.
+    """
+    cleaned = [argv[0]]
+    for a in argv[1:]:
+        base = os.path.basename(a).lower()
+        if base in ("main.py", "main.pyc", "main.pyo"):
+            continue
+        cleaned.append(a)
+    return cleaned
+
+
 def main():
+    if _is_pipeline_invocation(sys.argv):
+        _setup_stdio_for_pipeline()
+        sys.argv = _strip_pipeline_argv(sys.argv)
+        # Catch any unhandled exception so PyInstaller's --noconsole
+        # bootloader does NOT pop up its own "Unhandled exception in
+        # script" dialog.  We print the traceback to our redirected
+        # stdout (which is the parent GUI's pipe) and exit cleanly,
+        # so the error appears only in the GUI's processing log.
+        try:
+            import main as _pipeline_main
+            _pipeline_main.main()
+        except SystemExit:
+            raise
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        return
+
     app = PodcastAIStudio()
     app.mainloop()
 
