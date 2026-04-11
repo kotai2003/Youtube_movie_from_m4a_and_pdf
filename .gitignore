@@ -11,6 +11,10 @@ venv/
 build/
 dist/
 pyinstaller/cython_build_tmp/
+pyinstaller/compiled_modules/
+
+# Inno Setup installer output
+installer_output/
 
 # MkDocs
 site/

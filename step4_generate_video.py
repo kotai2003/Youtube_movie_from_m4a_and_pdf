@@ -9,9 +9,41 @@ Much faster than the moviepy-based approach used in earlier versions.
 """
 
 import os
+import sys
 import json
 import subprocess
 import shutil
+import tempfile
+
+
+def _ascii_safe_audio(audio_path: str):
+    """Return an ASCII-only path for *audio_path*, copying if necessary.
+
+    Some FFmpeg builds on Windows fail to open files whose path contains
+    Japanese / non-ASCII characters.  As a reliable workaround we copy
+    the file to the system temp directory (always ASCII-safe) and use
+    that copy for FFmpeg.
+
+    Returns
+    -------
+    tuple[str, str | None]
+        ``(path_to_use, tmp_to_cleanup)``.
+    """
+    if not audio_path or sys.platform != "win32":
+        return audio_path, None
+    try:
+        audio_path.encode("ascii")
+        return audio_path, None
+    except UnicodeEncodeError:
+        pass
+    try:
+        ext = os.path.splitext(audio_path)[1]
+        fd, tmp = tempfile.mkstemp(suffix=ext, prefix="podcast_ai_")
+        os.close(fd)
+        shutil.copy2(audio_path, tmp)
+        return tmp, tmp
+    except Exception:
+        return audio_path, None
 
 
 def _check_ffmpeg():
@@ -75,10 +107,16 @@ def generate_video(cuesheet: list[dict], audio_file: str, output_path: str,
 
     _check_ffmpeg()
 
+    # Windows の ffmpeg ビルドによっては日本語ファイル名で開けないため、
+    # 必要なら ASCII 一時コピーを作って以後の ffmpeg 入力として使う。
+    audio_for_ffmpeg, tmp_audio = _ascii_safe_audio(os.path.abspath(audio_file))
+    if tmp_audio:
+        print(f"  (日本語パス対策: 音声を一時 ASCII パスにコピー)")
+
     # 音声の長さを取得
     probe_cmd = [
         "ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1", audio_file
+        "-of", "default=noprint_wrappers=1:nokey=1", audio_for_ffmpeg
     ]
     result = subprocess.run(probe_cmd, capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
@@ -89,10 +127,10 @@ def generate_video(cuesheet: list[dict], audio_file: str, output_path: str,
     if cuesheet:
         cuesheet[-1]["end_time"] = max(cuesheet[-1]["end_time"], total_duration)
 
-    # 一時ディレクトリ（絶対パスで管理）
-    output_abs = os.path.abspath(os.path.dirname(output_path) or ".")
-    temp_dir = os.path.join(output_abs, "_temp_segments")
-    os.makedirs(temp_dir, exist_ok=True)
+    # 一時ディレクトリは常にシステム temp 配下に作る。
+    # こうすることで、Output Folder に日本語が含まれていても
+    # ffmpeg の concat / セグメント参照経路は ASCII になり安全。
+    temp_dir = tempfile.mkdtemp(prefix="podcast_ai_segs_")
 
     # 各スライドを動画セグメントに変換
     print(f"\n  スライドセグメントを生成中...")
@@ -173,7 +211,8 @@ def generate_video(cuesheet: list[dict], audio_file: str, output_path: str,
     output_abs_path = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(output_abs_path) if os.path.dirname(output_abs_path) else ".", exist_ok=True)
 
-    audio_abs = os.path.abspath(audio_file)
+    # ffmpeg には ASCII 安全な音声パスを渡す
+    audio_abs = audio_for_ffmpeg
     merged_abs = os.path.abspath(merged_video)
 
     # 字幕焼き込みチェック
@@ -215,6 +254,11 @@ def generate_video(cuesheet: list[dict], audio_file: str, output_path: str,
     # 一時ファイル削除
     print(f"  一時ファイルを削除中...")
     shutil.rmtree(temp_dir, ignore_errors=True)
+    if tmp_audio:
+        try:
+            os.remove(tmp_audio)
+        except OSError:
+            pass
 
     # 結果表示
     if os.path.exists(output_abs_path):

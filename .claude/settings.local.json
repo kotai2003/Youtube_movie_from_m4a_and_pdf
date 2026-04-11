@@ -12,7 +12,18 @@
       "Bash(cmd.exe:*)",
       "Bash(conda activate:*)",
       "Bash(\"C:/Users/seong/anaconda3/envs/py313_youtube/python.exe\":*)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(ls dist:*)",
+      "Bash(ls build:*)",
+      "Bash(timeout 20 ./run_gui_app.exe --step 99)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(timeout 30 ./run_gui_app.exe --step 4)",
+      "Bash(tasklist)",
+      "Bash(timeout 30 ./run_gui_app.exe --step 99)",
+      "Bash(where ISCC.exe)",
+      "Read(//c/Program Files \\(x86\\)/Inno Setup 6/**)",
+      "Read(//c/Program Files/Inno Setup 6/**)",
+      "Bash(\"C:\\\\Program Files \\(x86\\)\\\\Inno Setup 6\\\\ISCC.exe\" pyinstaller/installer.iss)"
     ]
   }
 }

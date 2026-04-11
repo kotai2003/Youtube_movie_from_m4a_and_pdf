@@ -8,11 +8,40 @@ import os
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_all
+
 block_cipher = None
 
 SPEC_DIR = os.path.abspath(SPECPATH)
 PROJECT_ROOT = os.path.dirname(SPEC_DIR)
 COMPILED_DIR = os.path.join(SPEC_DIR, "compiled_modules")
+APP_ICON = os.path.join(SPEC_DIR, "app_icon.ico")
+
+# ---------------------------------------------------------------------------
+# Pre-collect packages whose C extensions / data files / sub-modules are
+# not picked up by hiddenimports alone.
+#
+# `requests` checks at import time for chardet OR charset_normalizer; if
+# only the .pyd ends up in _internal/charset_normalizer/ (without the
+# Python __init__.py and friends), Python sees a directory without an
+# __init__.py and the import fails, leaving the warning:
+#   RequestsDependencyWarning: Unable to find acceptable character
+#   detection dependency (chardet or charset_normalizer)
+#
+# `collect_all` returns (datas, binaries, hiddenimports) so the package
+# is bundled completely.
+# ---------------------------------------------------------------------------
+_extra_datas = []
+_extra_binaries = []
+_extra_hiddenimports = []
+for _pkg in ("charset_normalizer", "chardet"):
+    try:
+        _d, _b, _h = collect_all(_pkg)
+        _extra_datas += _d
+        _extra_binaries += _b
+        _extra_hiddenimports += _h
+    except Exception as _e:
+        print(f"[SPEC] WARNING: collect_all({_pkg!r}) failed: {_e}")
 
 # ---------------------------------------------------------------------------
 # Analysis
@@ -20,7 +49,7 @@ COMPILED_DIR = os.path.join(SPEC_DIR, "compiled_modules")
 a = Analysis(
     [os.path.join(PROJECT_ROOT, "gui_apps", "run_gui_app.py")],
     pathex=[PROJECT_ROOT],
-    binaries=[],
+    binaries=[*_extra_binaries],
     datas=[
         # Include config.yaml template
         (os.path.join(PROJECT_ROOT, "config.yaml"), "."),
@@ -34,6 +63,13 @@ a = Analysis(
         # Whisper assets (mel_filters.npz, tiktoken files, normalizers)
         (os.path.join(sys.prefix, "Lib", "site-packages", "whisper", "assets"), os.path.join("whisper", "assets")),
         (os.path.join(sys.prefix, "Lib", "site-packages", "whisper", "normalizers"), os.path.join("whisper", "normalizers")),
+        # App icon — bundled next to other data so the GUI can load it
+        # at runtime instead of generating one with Pillow.
+        (APP_ICON, "."),
+        # charset_normalizer / chardet — full collection (Python files +
+        # C extensions + dist-info metadata) so `requests` can find them
+        # at import time.
+        *_extra_datas,
     ],
     hiddenimports=[
         "whisper",
@@ -48,6 +84,32 @@ a = Analysis(
         "tkinter.ttk",
         "tkinter.filedialog",
         "tkinter.scrolledtext",
+        # Pipeline modules — needed because the bundled exe re-launches
+        # itself in pipeline mode (see _is_pipeline_invocation in
+        # gui_apps/run_gui_app.py) and imports `main` to dispatch the
+        # step.  Listed explicitly so PyInstaller's static analyser
+        # always pulls them into the PYZ regardless of how the GUI
+        # source is read.
+        "main",
+        "step1_extract_slides",
+        "step2_transcribe",
+        "step3_match",
+        "step4_generate_video",
+        "subtitle_generator",
+        # Step 1 OCR fallback (easyocr → torchvision → torch._dynamo)
+        # transitively needs sympy.  Some of torch's _dynamo paths use
+        # dynamic / string-based imports that PyInstaller can't always
+        # follow, so we list it explicitly.
+        "sympy",
+        # `requests` (used by Ollama HTTP calls in step3) needs a
+        # character detection backend; without it, requests emits
+        # `RequestsDependencyWarning: Unable to find acceptable
+        # character detection dependency (chardet or charset_normalizer)`
+        # and falls back unsafely. The full package is also collected
+        # via collect_all() above to bring in C extensions and metadata.
+        "charset_normalizer",
+        "chardet",
+        *_extra_hiddenimports,
     ],
     hookspath=[],
     hooksconfig={},
@@ -61,11 +123,14 @@ a = Analysis(
         "setuptools", "pip", "wheel", "distutils",
         "Cython",
         # Unused scientific / ML packages
-        "scipy", "sklearn", "scikit-learn",
+        # NOTE: do NOT exclude scipy / cv2 / sympy — they are required
+        # by easyocr (Step 1 OCR fallback) → torchvision → torch.
+        # Excluding them previously broke `python main.py --step 1`
+        # in the bundled exe with ModuleNotFoundError.
+        "sklearn", "scikit-learn",
         "pandas", "matplotlib", "seaborn", "plotly",
-        "sympy", "statsmodels",
+        "statsmodels",
         "tensorboard", "tensorflow", "keras",
-        "cv2", "opencv-python",
         # Unused network / web frameworks
         "flask", "django", "fastapi", "uvicorn", "starlette",
         "aiohttp", "tornado", "twisted",
@@ -76,7 +141,8 @@ a = Analysis(
         "cryptography", "paramiko",
         "lxml", "html5lib",
         "pygments",
-        "pydoc",
+        # NOTE: do NOT exclude `pydoc` — scipy._lib._docscrape imports
+        # it, and excluding it breaks any easyocr / scipy import chain.
         "lib2to3",
         "multiprocessing.popen_spawn_posix",
         "multiprocessing.popen_fork",
@@ -145,7 +211,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    icon=APP_ICON,
 )
 
 # ---------------------------------------------------------------------------

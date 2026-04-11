@@ -74,7 +74,13 @@ input/
 
 ## 使い方
 
-### GUI（推奨）
+### Windows インストーラ版（エンドユーザ向け推奨）
+
+`installer_output\PodcastAIStudio-Setup-{version}.exe` をダブルクリックしてインストール後、スタートメニューまたはデスクトップから **Podcast AI Studio** を起動してください。Python 環境のセットアップは不要です（FFmpeg と Ollama は別途必要）。
+
+インストーラのビルド方法は [PyInstaller / インストーラビルド](#pyinstaller--インストーラビルド) を参照してください。
+
+### GUI（開発者向け / Python 環境がある場合）
 
 ```bash
 # Podcast AI Studio（ダークテーマ・商用ソフト風GUI）
@@ -160,9 +166,13 @@ output/
 → `config.yaml` の `whisper.model` を `tiny` または `base` に変更
 → GUIの場合は AI Settings セクションで Whisper Model を変更
 
-### 日本語フォルダ名で動作しない
-→ v0.4.1で修正済み。プロジェクトフォルダや入力ファイルのパスに日本語（非ASCII文字）が含まれていても正常に動作します。
-→ GUIのファイル選択では絶対パスを使用し、FFmpegへのパス受け渡しもUnicode対応済みです。
+### 日本語フォルダ名・ファイル名で動作しない
+→ v0.4.2 で根本対策済み。Audio File / Slides File / Output Folder のいずれに日本語（非ASCII文字）が含まれていても正常に動作します。
+→ 対策内容:
+  - GUI のすべてのパス処理を `_resolve_path()`（pathlib ベース）に統一し、設定ファイルへ常に絶対パスで保存
+  - Whisper／FFmpeg に渡す音声ファイルは、非ASCIIを含む場合のみシステム一時領域へコピー（`tempfile.mkstemp`）し、ASCII 安全なパス経由で実行（処理後に自動削除）
+  - Step 4 の中間ファイル用 `temp_dir` は `tempfile.mkdtemp()` でシステム一時領域に作成し、ユーザの出力フォルダに日本語があっても FFmpeg の concat 入力経路は ASCII で完結
+  - subprocess 呼び出しは `encoding="utf-8", errors="replace"` を指定して cp932 デコードエラーを回避
 
 ## プロジェクト構成
 
@@ -180,9 +190,54 @@ output/
 ├── step3_match.py              # Ollama LLMマッチング
 ├── step4_generate_video.py     # FFmpeg動画生成
 ├── subtitle_generator.py       # SRT字幕生成
+├── pyinstaller/                # PyInstaller + Inno Setup ビルド資産
+│   ├── build.bat               #   PyInstaller ビルドエントリ
+│   ├── run_gui_app.spec        #   PyInstaller spec
+│   ├── installer.iss           #   Inno Setup インストーラスクリプト
+│   ├── app_icon.ico            #   マルチ解像度アプリアイコン
+│   └── rthook_stdio.py         #   ランタイムフック
 ├── config.yaml.example         # 設定ファイルテンプレート
 └── requirements.txt            # Pythonパッケージ
 ```
+
+## PyInstaller / インストーラビルド
+
+開発者向けに、Python 環境なしでも動作する Windows インストーラを生成できます。
+
+### 必要なもの
+
+- **PyInstaller** (`pip install pyinstaller`)
+- **Inno Setup 6** ([https://jrsoftware.org/isinfo.php](https://jrsoftware.org/isinfo.php) からインストール)
+- **UPX**（任意・推奨）— exe を圧縮。PATH に通すか、spec の `strip` / `upx` フラグを `False` に変更
+
+### 1. exe フォルダのビルド
+
+```bash
+cd pyinstaller
+build.bat
+# → ../dist/run_gui_app/run_gui_app.exe (folder distribution, 約 4.2 GB)
+```
+
+### 2. インストーラ生成
+
+```bash
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" pyinstaller/installer.iss
+# → installer_output/PodcastAIStudio-Setup-{version}.exe (約 1.6 GB)
+```
+
+### 配布フォルダのサイズについて
+
+`dist/run_gui_app/` は PyTorch / Whisper モデル / scipy / cv2 等を含むため約 **4.2 GB**、Inno Setup の lzma2/ultra64 圧縮後は約 **1.6 GB** です。これは Whisper を完全オフラインで動作させるために必要なサイズです。
+
+### 動作確認（exe ビルド後の推奨スモークテスト）
+
+```bash
+# dispatcher が正しく組み込まれているか
+dist\run_gui_app\run_gui_app.exe --step 99
+# → "argument --step: invalid choice: '99'" と表示されて exit 2 になればOK
+```
+
+詳細なビルド仕様 / トラブルシューティングは [`CLAUDE.md`](CLAUDE.md) の "PyInstaller Build" / "Inno Setup installer" セクションを参照してください。
 
 ## GUI画面構成（rev004）
 

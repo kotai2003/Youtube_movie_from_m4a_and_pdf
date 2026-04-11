@@ -7,10 +7,45 @@ Supports Japanese, Korean, and English (auto-detected or manually set).
 """
 
 import os
+import sys
 import json
+import shutil
+import tempfile
 
 
-def transcribe_audio(audio_file: str, output_dir: str, 
+def _ascii_safe_audio(audio_path: str):
+    """Return an ASCII-only path for *audio_path*, copying if necessary.
+
+    Some FFmpeg builds on Windows fail to open files whose path contains
+    Japanese / non-ASCII characters, which breaks Whisper audio loading.
+    On Windows, when the path is not ASCII-only we copy the file to the
+    system temp directory and use that copy.
+
+    Returns
+    -------
+    tuple[str, str | None]
+        ``(path_to_use, tmp_to_cleanup)``.  ``tmp_to_cleanup`` is the
+        caller's responsibility to remove; ``None`` when no copy was
+        required.
+    """
+    if not audio_path or sys.platform != "win32":
+        return audio_path, None
+    try:
+        audio_path.encode("ascii")
+        return audio_path, None
+    except UnicodeEncodeError:
+        pass
+    try:
+        ext = os.path.splitext(audio_path)[1]
+        fd, tmp = tempfile.mkstemp(suffix=ext, prefix="podcast_ai_")
+        os.close(fd)
+        shutil.copy2(audio_path, tmp)
+        return tmp, tmp
+    except Exception:
+        return audio_path, None
+
+
+def transcribe_audio(audio_file: str, output_dir: str,
                      model_name: str = "small", language: str = "ja") -> list[dict]:
     """Transcribe audio with Whisper and return timestamped segments.
 
@@ -46,14 +81,27 @@ def transcribe_audio(audio_file: str, output_dir: str,
     # モデルロード
     print(f"\n  モデルをロード中...")
     model = whisper.load_model(model_name)
-    
+
+    # Whisper は内部で ffmpeg を呼ぶ。Windows では ffmpeg ビルドによって
+    # 日本語ファイル名で失敗するため、必要に応じて ASCII 一時コピーを使う。
+    audio_for_whisper, tmp_audio = _ascii_safe_audio(audio_file)
+    if tmp_audio:
+        print(f"  (日本語パス対策: 一時 ASCII コピーを使用)")
+
     # 文字起こし実行
     print(f"  文字起こし実行中...")
-    result = model.transcribe(
-        audio_file,
-        language=language,
-        verbose=False
-    )
+    try:
+        result = model.transcribe(
+            audio_for_whisper,
+            language=language,
+            verbose=False
+        )
+    finally:
+        if tmp_audio:
+            try:
+                os.remove(tmp_audio)
+            except OSError:
+                pass
     
     # セグメント整形
     segments = []
